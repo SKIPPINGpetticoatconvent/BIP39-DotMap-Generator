@@ -94,8 +94,23 @@ def decrypt_columns(col1: str, col2: str, col3: str, seed: int, bits: int = 11):
     return decrypted_col1, decrypted_col2, decrypted_col3
 
 
-def number_to_dotmap(n: int, seed: int, bits: int = 11):
-    """将单词索引号 n 转换为二进制的点图 (为手动解码优化)，并应用加密"""
+def apply_encryption(col1: str, col2: str, col3: str, seed: int, bits: int, encrypt_mode: str):
+    """
+    根据加密模式决定是否进行旋转加密。
+    encrypt_mode:
+        - "none"   : 无加密（不旋转）
+        - "sha256" : 使用 seed 做随机旋转
+    """
+    if encrypt_mode == "none":
+        # 无加密模式，直接返回
+        return col1, col2, col3
+    else:
+        # 默认使用原有加密逻辑（seed来自密码哈希）
+        return encrypt_columns(col1, col2, col3, seed, bits)
+
+
+def number_to_dotmap(n: int, seed: int, bits: int = 11, encrypt_mode: str = "sha256"):
+    """将单词索引号 n 转换为二进制的点图 (为手动解码优化)，并应用（可选）加密"""
     # 1. 生成标准的二进制字符串 (高位在前)
     binary_str = bin(n - 1)[2:].zfill(bits)
 
@@ -114,15 +129,17 @@ def number_to_dotmap(n: int, seed: int, bits: int = 11):
         col2 = "".join(dots[4:8])   # 16,32,64,128
         col3 = "".join(dots[8:12])  # 256,512,1024,2048
 
-    # 4. 应用基于种子的随机加密置换
-    encrypted_cols = encrypt_columns(col1, col2, col3, seed, bits)
-    return encrypted_cols[0], encrypted_cols[1], encrypted_cols[2]
+    # 4. 应用加密模式（无加密 / SHA-256）
+    col1, col2, col3 = apply_encryption(col1, col2, col3, seed, bits, encrypt_mode)
+
+    return col1, col2, col3
 
 
-def generate_pdf(words, output_file="bip39_encrypted_dotmap.pdf", seed=None, bits=11):
+def generate_pdf(words, output_file="bip39_encrypted_dotmap.pdf", seed=None, bits=11, encrypt_mode: str = "sha256"):
     """为物理雕刻和手动恢复场景，生成优化后的 PDF"""
     if seed is None:
         # 默认种子（无密码时用），这里用固定常量即可
+        # 对于 encrypt_mode == "none" 实际不会使用
         seed = int(hashlib.sha256(b"default").hexdigest(), 16)
 
     c = canvas.Canvas(output_file, pagesize=A4)
@@ -145,8 +162,13 @@ def generate_pdf(words, output_file="bip39_encrypted_dotmap.pdf", seed=None, bit
     text.textLine("  ● (Solid Dot)   represents a 1 (the weight is selected)")
     text.textLine("  ○ (Hollow Dot)  represents a 0 (the weight is not selected)")
     text.textLine(" ")
-    text.textLine("ENCRYPTION NOTE: Dots within each column are randomly rotated using password-derived seed.")
-    text.textLine("Use the same password to decrypt and recover original positions.")
+
+    if encrypt_mode == "none":
+        text.textLine("ENCRYPTION MODE: None. Dots in each column are NOT rotated.")
+        text.textLine("You can directly sum the weights of all ● dots and add 1 to get the word index.")
+    else:
+        text.textLine("ENCRYPTION NOTE: Dots within each column are randomly rotated using password-derived seed.")
+        text.textLine("Use the same password to decrypt and recover original positions.")
     text.textLine(" ")
 
     # 【关键】说明权重顺序
@@ -175,9 +197,14 @@ def generate_pdf(words, output_file="bip39_encrypted_dotmap.pdf", seed=None, bit
         c.setFont(FONT_NAME_BOLD, font_size)
         c.drawString(x_index, y_pos, "Index")
         c.drawString(x_word, y_pos, "Word")
-        c.drawString(x_col1, y_pos, "Col1 (Random)")
-        c.drawString(x_col2, y_pos, "Col2 (Random)")
-        c.drawString(x_col3, y_pos, "Col3 (Random)")
+        # 列标题根据是否加密动态标记
+        if encrypt_mode == "none":
+            suffix = ""
+        else:
+            suffix = " (Random)"
+        c.drawString(x_col1, y_pos, f"Col1{suffix}")
+        c.drawString(x_col2, y_pos, f"Col2{suffix}")
+        c.drawString(x_col3, y_pos, f"Col3{suffix}")
         c.line(x_margin, y_pos - 1.5 * mm, width - x_margin, y_pos - 1.5 * mm)
 
     draw_header(y)
@@ -192,7 +219,7 @@ def generate_pdf(words, output_file="bip39_encrypted_dotmap.pdf", seed=None, bit
             y -= line_height * 1.5
             c.setFont(FONT_NAME, font_size)
 
-        col1, col2, col3 = number_to_dotmap(i, seed, bits)
+        col1, col2, col3 = number_to_dotmap(i, seed, bits, encrypt_mode)
 
         c.drawString(x_index, y, str(i))
         c.drawString(x_word, y, word)
@@ -224,7 +251,7 @@ class BIP39GUI:
     def __init__(self, root):
         self.root = root
         self.root.title("BIP39 Encrypted DotMap Generator")
-        self.root.geometry("500x350")
+        self.root.geometry("500x380")
         self.root.resizable(False, False)
 
         # 模式选择
@@ -251,26 +278,34 @@ class BIP39GUI:
             command=self.toggle_password
         ).grid(row=1, column=2, padx=10, pady=10)
 
+        # 加密模式选择
+        ttk.Label(root, text="加密模式:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        self.encrypt_mode_var = tk.StringVar(value="sha256")
+        encrypt_frame = ttk.Frame(root)
+        encrypt_frame.grid(row=2, column=1, padx=10, pady=10, sticky="w")
+        ttk.Radiobutton(encrypt_frame, text="无加密", variable=self.encrypt_mode_var, value="none").pack(side=tk.LEFT)
+        ttk.Radiobutton(encrypt_frame, text="SHA-256 加密", variable=self.encrypt_mode_var, value="sha256").pack(side=tk.LEFT)
+
         # 输出文件选择
-        ttk.Label(root, text="输出文件:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        ttk.Label(root, text="输出文件:").grid(row=3, column=0, padx=10, pady=10, sticky="w")
         self.output_var = tk.StringVar(value="bip39_encrypted_dotmap.pdf")
         self.output_entry = ttk.Entry(root, textvariable=self.output_var)
-        self.output_entry.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-        ttk.Button(root, text="浏览...", command=self.browse_output).grid(row=2, column=2, padx=10, pady=10)
+        self.output_entry.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+        ttk.Button(root, text="浏览...", command=self.browse_output).grid(row=3, column=2, padx=10, pady=10)
 
         # 生成按钮
         self.generate_button = ttk.Button(root, text="生成PDF", command=self.generate_pdf)
-        self.generate_button.grid(row=3, column=1, pady=20)
+        self.generate_button.grid(row=4, column=1, pady=20)
 
         # 进度条
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(root, variable=self.progress_var, maximum=100)
-        self.progress_bar.grid(row=4, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
+        self.progress_bar.grid(row=5, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
 
         # 状态标签
         self.status_var = tk.StringVar(value="准备就绪")
         self.status_label = ttk.Label(root, textvariable=self.status_var)
-        self.status_label.grid(row=5, column=0, columnspan=3, padx=10, pady=5)
+        self.status_label.grid(row=6, column=0, columnspan=3, padx=10, pady=5)
 
         # 配置列权重
         root.columnconfigure(1, weight=1)
@@ -294,9 +329,11 @@ class BIP39GUI:
         mode = self.mode_var.get()
         password = self.password_var.get()
         output_file = self.output_var.get()
+        encrypt_mode = self.encrypt_mode_var.get()
 
-        if not password:
-            messagebox.showerror("错误", "请输入密码！")
+        # 无加密模式下可以不输入密码；SHA-256 模式必须输入密码
+        if encrypt_mode != "none" and not password:
+            messagebox.showerror("错误", "SHA-256 加密模式下必须输入密码！")
             return
 
         if not output_file:
@@ -311,12 +348,12 @@ class BIP39GUI:
         # 在后台线程中运行PDF生成
         thread = threading.Thread(
             target=self._generate_pdf_thread,
-            args=(mode, password, output_file),
+            args=(mode, password, output_file, encrypt_mode),
             daemon=True,
         )
         thread.start()
 
-    def _generate_pdf_thread(self, mode, password, output_file):
+    def _generate_pdf_thread(self, mode, password, output_file, encrypt_mode):
         try:
             bits = int(mode)
             list_length = 2 ** bits  # 11位=2048, 12位=4096，但我们只有2048个单词
@@ -324,22 +361,32 @@ class BIP39GUI:
             all_words = load_words()
             words = all_words[:list_length] if list_length <= len(all_words) else all_words
 
-            # 生成种子
-            seed = get_password_seed(password)
+            # 生成种子（无加密模式下种子为0，不会被使用）
+            if encrypt_mode == "none":
+                seed = 0
+            else:
+                seed = get_password_seed(password)
+
             weight_range = "1-1024" if bits == 11 else "1-2048"
 
             # 以下所有 UI 操作通过 root.after 切回主线程，保证线程安全
             self.root.after(0, lambda: self.status_var.set(
-                f"正在生成 {bits}位模式 PDF (权重 {weight_range})..."
+                f"正在生成 {bits}位模式 PDF (权重 {weight_range}, 模式: {encrypt_mode})..."
             ))
             self.root.after(0, lambda: self.progress_var.set(50))
 
             # 真正执行 PDF 生成（纯计算 + 文件 IO，不触碰 Tk 对象）
-            generate_pdf(words, output_file, seed, bits)
+            generate_pdf(words, output_file, seed, bits, encrypt_mode)
 
             self.root.after(0, lambda: self.progress_var.set(100))
             self.root.after(0, lambda: self.status_var.set(f"PDF生成成功: {output_file}"))
-            self.root.after(0, lambda: messagebox.showinfo("成功", f"PDF已生成!\n种子: {seed}"))
+
+            if encrypt_mode == "none":
+                msg = "PDF已生成！（无加密模式）"
+            else:
+                msg = f"PDF已生成!\n种子: {seed}"
+
+            self.root.after(0, lambda: messagebox.showinfo("成功", msg))
 
         except Exception as e:
             self.root.after(0, lambda: self.status_var.set(f"生成失败: {str(e)}"))
@@ -363,21 +410,21 @@ def main():
         )
         parser.add_argument(
             "--password",
-            help="Password for encryption (will prompt if not provided)",
+            help="Password for encryption (will prompt if not provided in sha256 mode)",
         )
         parser.add_argument(
             "--output",
             default="bip39_encrypted_dotmap.pdf",
             help="Output PDF file path",
         )
+        parser.add_argument(
+            "--encrypt",
+            choices=["none", "sha256"],
+            default="sha256",
+            help="Encryption mode: 'none' (no rotation) or 'sha256' (password-based rotation)",
+        )
 
         args = parser.parse_args()
-
-        # 获取密码
-        if args.password:
-            password = args.password
-        else:
-            password = getpass.getpass("Enter password for encryption: ")
 
         bits = int(args.mode)
         list_length = 2 ** bits
@@ -386,15 +433,34 @@ def main():
             all_words = load_words()
             words = all_words[:list_length] if list_length <= len(all_words) else all_words
 
-            seed = get_password_seed(password)
-            weight_range = "1-1024" if bits == 11 else "1-2048"
+            encrypt_mode = args.encrypt
 
-            print(
-                f"Generating PDF with {bits}-bit mode (weights {weight_range}) "
-                f"using password-based encryption..."
-            )
-            generate_pdf(words, args.output, seed, bits)
-            print(f"Encryption seed: {seed} (derived from password)")
+            if encrypt_mode == "none":
+                seed = 0
+                weight_range = "1-1024" if bits == 11 else "1-2048"
+                print(
+                    f"Generating PDF with {bits}-bit mode (weights {weight_range}) "
+                    f"in NO-ENCRYPTION mode..."
+                )
+            else:
+                # 获取密码
+                if args.password:
+                    password = args.password
+                else:
+                    password = getpass.getpass("Enter password for encryption: ")
+
+                seed = get_password_seed(password)
+                weight_range = "1-1024" if bits == 11 else "1-2048"
+
+                print(
+                    f"Generating PDF with {bits}-bit mode (weights {weight_range}) "
+                    f"using password-based encryption (SHA-256/SHA3-256)..."
+                )
+
+            generate_pdf(words, args.output, seed, bits, encrypt_mode)
+
+            if encrypt_mode != "none":
+                print(f"Encryption seed: {seed} (derived from password)")
 
         except (FileNotFoundError, ValueError) as e:
             print(e)
